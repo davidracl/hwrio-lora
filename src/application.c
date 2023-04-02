@@ -3,32 +3,51 @@
 // Forum https://forum.hardwario.com/
 
 #include <application.h>
-
 #include <stdio.h>
-
 #include <time.h>
-
 #include <twr_delay.h>
 
-#define SCD41_ADDR 0x62                                                                             // Adresa senzoru SCD41 na sběrnici I2C
+#define SEND_DATA_INTERVAL          (1 * 60 * 1000)
+#define MEASURE_INTERVAL            (1 * 30 * 1000)
 
-#define CRC8_POLYNOMIAL 0x31                                                                        // Použito při výpočtu CRC.
+#define SCD41_ADDR 0x62                                                                             
+#define CRC8_POLYNOMIAL 0x31
 #define CRC8_INIT 0xFF
 
-twr_module_lcd_button_t btnL = TWR_MODULE_LCD_BUTTON_LEFT;                                          // Parametry k LCD.
-twr_module_lcd_button_t btnR = TWR_MODULE_LCD_BUTTON_RIGHT;
-twr_led_t lcdLed;
+enum {
+    HEADER_BOOT         = 0x00,
+    HEADER_UPDATE       = 0x01,
+    HEADER_BUTTON_CLICK = 0x02
 
+} header = HEADER_BOOT;
+
+twr_module_lcd_button_t btnL = TWR_MODULE_LCD_BUTTON_LEFT;
+twr_module_lcd_button_t btnR = TWR_MODULE_LCD_BUTTON_RIGHT;
+twr_cmwx1zzabz_t lora;
+twr_led_t lcdLed;
 twr_gfx_t *pgfx;
 
-twr_scheduler_task_id_t write_sensor_data_id;                                                       // ID tasku.
+twr_led_t led;
+
+twr_scheduler_task_id_t write_sensor_data_id;
 twr_scheduler_task_id_t get_sensor_data_id;
+twr_scheduler_task_id_t battery_measure_task_id;
+twr_scheduler_task_id_t measurement_task_id;
+twr_scheduler_task_id_t refresh_display_task_id;
 
-float CO2Val            = 0;                                                                        // Předpřipravené proměnné pro uložení dat.
-float temperatureVal    = 0;
-float humidityVal       = 0;
+TWR_DATA_STREAM_FLOAT_BUFFER(sm_voltage_buffer, 8)
+TWR_DATA_STREAM_FLOAT_BUFFER(sm_temperature_buffer, (SEND_DATA_INTERVAL / MEASURE_INTERVAL))
+TWR_DATA_STREAM_FLOAT_BUFFER(sm_humidity_buffer, (SEND_DATA_INTERVAL / MEASURE_INTERVAL))
+TWR_DATA_STREAM_FLOAT_BUFFER(sm_co2_buffer, (SEND_DATA_INTERVAL / MEASURE_INTERVAL))
 
-uint8_t sensor_common_generate_crc(const uint8_t* data, uint16_t count) {                           // Kontrola CRC. Kód z datasheetu.
+twr_data_stream_t sm_voltage;
+twr_data_stream_t sm_temperature;
+twr_data_stream_t sm_humidity;
+twr_data_stream_t sm_co2;
+
+void lora_callback(twr_cmwx1zzabz_t *self, twr_cmwx1zzabz_event_t event, void *event_param);
+
+uint8_t generate_8bit_crc(const uint8_t* data, uint16_t count) {
     uint16_t current_byte;
     uint8_t crc = CRC8_INIT;
     uint8_t crc_bit;
@@ -44,6 +63,28 @@ uint8_t sensor_common_generate_crc(const uint8_t* data, uint16_t count) {       
     }
     return crc;
 }
+
+bool isCrcCorrect(const uint8_t* data, const uint8_t* crc) {
+    return data == crc;
+}
+
+bool scd41_send_single_shot_measurement_command() {
+    uint8_t tx_buffer[2] = { 0x21, 0x9D };
+
+    twr_i2c_transfer_t singleShotTransfer;
+    singleShotTransfer.device_address = SCD41_ADDR;
+    singleShotTransfer.buffer = tx_buffer;                  
+    singleShotTransfer.length = sizeof(tx_buffer);                  
+
+    return twr_i2c_write(TWR_I2C_I2C0, &singleShotTransfer);
+}
+
+bool scd41_read_latest_measured_data() {
+    
+
+    return false;
+}
+
 
 void write_sensor_data() {
     twr_i2c_transfer_t singleShot;
@@ -64,10 +105,13 @@ void write_sensor_data() {
 }
 
 void get_sensor_data() {
-    twr_i2c_transfer_t readData;                                                                    // Struktura pro čtení dat.
-    uint8_t rx_buffer[9];                                                                           // Buffer pro příjem 9 bajtů.
+    twr_i2c_transfer_t readData;
+    uint8_t rx_buffer[9];
+    float CO2Val            = 0;
+    float temperatureVal    = 0;
+    float humidityVal       = 0;
 
-    readData.device_address = SCD41_ADDR;                                                           // Adresa SCD modulu.
+    readData.device_address = SCD41_ADDR;
     readData.buffer = rx_buffer;            
     readData.length = sizeof(rx_buffer);            
 
@@ -77,9 +121,11 @@ void get_sensor_data() {
     uint8_t crcCO2Result = sensor_common_generate_crc(crcCO2, 2);                                   // Uložení výsledku CRC.
     if (crcCO2Result == rx_buffer[2]) {                                                             // Když CRC kontrola je shodná s přijatým CRC bajtem.
         CO2Val = (float)((int16_t)(rx_buffer[0] << 8 | rx_buffer[1]));                              // Sjednocení 2 bajtů do wordu.
-        twr_atci_printfln("CO2: %0.2f ppm", CO2Val);                                                // Výpis do konzoly.
+        twr_atci_printfln("CO2: %0.2f ppm", CO2Val); 
+        
+        twr_data_stream_feed(&sm_co2, &CO2Val);
     }           
-    else {                                                                                          // V případě, že CRC nesouhlasi.
+    else {
         twr_atci_printfln("CO2: Chyba při čtení dat. CRC checksum není správné.");          
     }           
 
@@ -88,7 +134,9 @@ void get_sensor_data() {
     if (crcTemperatureResult == rx_buffer[5]) {         
         float temperatureData = (float)((int16_t)(rx_buffer[3] << 8 | rx_buffer[4]));           
         temperatureVal = -45 + 175 * (temperatureData / 65535.0f);                                  // Výpočet hodnoty pro teplotu z datasheetu.
-        twr_atci_printfln("Teplota: %0.2f °C", temperatureVal);         
+        twr_atci_printfln("Teplota: %0.2f °C", temperatureVal);
+
+        twr_data_stream_feed(&sm_temperature, &temperatureVal);
     }           
     else {          
         twr_atci_printfln("Teplota: Chyba při čtení dat. CRC checksum není správné.");          
@@ -100,10 +148,40 @@ void get_sensor_data() {
         float humidityData = (float)((int16_t)(rx_buffer[6] << 8 | rx_buffer[7]));          
         humidityVal = humidityData * 100.0f / 65535.0f;                                             // Výpočet hodnoty pro vlhkost z datasheetu.
         twr_atci_printfln("Vlhkost: %0.2f %%", humidityVal);
+
+        twr_data_stream_feed(&sm_humidity, &humidityVal);
     }
     else {
         twr_atci_printfln("Vlhkost: Chyba při čtení dat. CRC checksum není správné.");
     }
+}
+
+static void scd41_start(){
+    twr_gpio_set_output(TWR_GPIO_P1, 1);
+}
+
+static void scd41_stop_scd41(){
+    twr_gpio_set_output(TWR_GPIO_P1, 1);
+}
+
+static void measurement_task(void* param) {
+    (void) param;
+
+    scd41_start();
+
+    if(scd41_send_single_shot_measurement_command()){
+
+    };
+    
+    scd41_stop();
+
+    twr_scheduler_plan_current_relative(MEASURE_INTERVAL);
+    twr_scheduler_plan_now(refresh_display_task_id);
+}
+
+static void refresh_display_task(void* param) {
+    (void) param;
+
 }
 
 void lcd_event_handler(twr_module_lcd_event_t event, void *event_param) {
@@ -137,44 +215,160 @@ void lcd_event_handler(twr_module_lcd_event_t event, void *event_param) {
 
 void application_init(void)
 {
-    const twr_led_driver_t* driver = twr_module_lcd_get_led_driver();                               // LED na LCD modulu.
-    twr_led_init_virtual(&lcdLed, TWR_MODULE_LCD_LED_BLUE, driver, 1);                              // Inicializace LED.
+    twr_data_stream_init(&sm_voltage, 1, &sm_voltage_buffer);
+    twr_data_stream_init(&sm_temperature, 1, &sm_temperature_buffer);
+    twr_data_stream_init(&sm_humidity, 1, &sm_humidity_buffer);
+    twr_data_stream_init(&sm_co2, 1, &sm_co2_buffer);
 
-    twr_module_lcd_init();                                                                          // Inicializace LCD.
+    const twr_led_driver_t* driver = twr_module_lcd_get_led_driver();
+    twr_led_init_virtual(&lcdLed, TWR_MODULE_LCD_LED_BLUE, driver, 1);
 
-    twr_module_lcd_set_event_handler(lcd_event_handler, NULL);                                      // Event pro tlačitka.
+    twr_module_lcd_init();
+
+    twr_module_lcd_set_event_handler(lcd_event_handler, NULL);
 
     pgfx = twr_module_lcd_get_gfx();
     twr_gfx_set_font(pgfx, &twr_font_ubuntu_15);
 
-    static const twr_atci_command_t commands[] = {                                                  // Bez tohoto nejede sériová linka.
+    static const twr_atci_command_t commands[] = {
             TWR_ATCI_COMMAND_CLAC,                  
             TWR_ATCI_COMMAND_HELP                   
     };                  
                     
-    twr_atci_init(commands, TWR_ATCI_COMMANDS_LENGTH(commands));                                    // Inicializace sériové linky.
-                    
-    twr_gpio_init(TWR_GPIO_P1);                                                                     // Inicializace GPIO.
+    twr_atci_init(commands, TWR_ATCI_COMMANDS_LENGTH(commands));
+
+    twr_data_stream_init(&sm_voltage, 1, &sm_voltage_buffer);
+
+    twr_gpio_init(TWR_GPIO_P1);
     twr_gpio_set_mode(TWR_GPIO_P1, TWR_GPIO_MODE_OUTPUT);                   
-                    
-    twr_gpio_set_output(TWR_GPIO_P1, 1);                                                            // Napájení pro SCD41.
-                    
-    twr_i2c_init(TWR_I2C_I2C0, TWR_I2C_SPEED_100_KHZ);                                              // Inicializace I2C na 100 kHz.
-                    
-    twr_delay_us(65000);                                                                            // Po inicializaci je potřeba čekat nějakou dobu,
-    twr_delay_us(65000);                                                                            // ale nikde není psáno kolik.
-    twr_delay_us(65000);                                                                            // Tady tento delay je dostatečný.
-    twr_delay_us(65000);
+             
+    twr_i2c_init(TWR_I2C_I2C0, TWR_I2C_SPEED_100_KHZ);
 
-    write_sensor_data_id = twr_scheduler_register(write_sensor_data, NULL, TWR_TICK_INFINITY);      // Registrace tasku pro zapsání dat.
-    get_sensor_data_id   = twr_scheduler_register(get_sensor_data, NULL, TWR_TICK_INFINITY);        // Registrace tasku pro čtení dat.
+    // TODO: cleancode
+    write_sensor_data_id = twr_scheduler_register(write_sensor_data, NULL, TWR_TICK_INFINITY);
+    get_sensor_data_id   = twr_scheduler_register(get_sensor_data, NULL, TWR_TICK_INFINITY);
+    measurement_task_id   = twr_scheduler_register(measurement_task, NULL, TWR_TICK_INFINITY);
+    refresh_display_task_id   = twr_scheduler_register(refresh_display_task, NULL, TWR_TICK_INFINITY);
 
-    write_sensor_data();                                                                            // Prvotní spuštění funkce. Při prvním spuštění nejsou dostupná data.
+    twr_cmwx1zzabz_init(&lora, TWR_UART_UART1);
+    twr_cmwx1zzabz_set_event_handler(&lora, lora_callback, NULL);
+    twr_cmwx1zzabz_set_class(&lora, TWR_CMWX1ZZABZ_CONFIG_CLASS_A);
+
+    twr_scheduler_plan_from_now(measurement_task_id, 5 * 1000);
 }
 
 void application_task(void)
 {
-    twr_scheduler_plan_now(write_sensor_data_id);                                                   // Start task write_sensor_data_id.
+    if (!twr_cmwx1zzabz_is_ready(&lora))
+    {
+        twr_scheduler_plan_current_relative(100);
+
+        return;
+    }
+
+    static uint8_t payload_buffer[9];
+
+    memset(payload_buffer, 0xff, sizeof(payload_buffer));
+
+    payload_buffer[0] = header;
+
+    float battery_voltage_avg = NAN;
+
+    twr_data_stream_get_average(&sm_temperature, &battery_voltage_avg);
+
+    if (!isnan(battery_voltage_avg))
+    {
+        int16_t battery_i16 = (int16_t) (battery_voltage_avg);
+
+        payload_buffer[1] = battery_i16 >> 8;
+        payload_buffer[2] = battery_i16;
+    }
+
+    float temperature_avg = NAN;
+
+    twr_data_stream_get_average(&sm_temperature, &temperature_avg);
+
+    if (!isnan(temperature_avg))
+    {
+        int16_t temperature_i16 = (int16_t) (temperature_avg);
+
+        payload_buffer[3] = temperature_i16 >> 8;
+        payload_buffer[4] = temperature_i16;
+    }
+
+    float humidity_avg = NAN;
+
+    twr_data_stream_get_average(&sm_humidity, &humidity_avg);
+
+    if (!isnan(humidity_avg))
+    {
+        int16_t humidity_i16 = (int16_t) (humidity_avg);
+
+        payload_buffer[5] = humidity_i16 >> 8;
+        payload_buffer[6] = humidity_i16;
+    }
+
+    float co2_avg = NAN;
+
+    twr_data_stream_get_average(&sm_co2, &co2_avg);
+
+    if (!isnan(co2_avg))
+    {
+        uint16_t co2_i16 = (uint16_t) (co2_avg);
+        payload_buffer[7] = co2_i16 >> 8;
+        payload_buffer[8] = co2_i16;
+    }
+
+    header = HEADER_UPDATE;
+
+    twr_cmwx1zzabz_send_message(&lora, payload_buffer, sizeof(payload_buffer));
+
+    static char tmp[sizeof(payload_buffer) * 2 + 1];
+    for (size_t i = 0; i < sizeof(payload_buffer); i++)
+    {
+        sprintf(tmp + i * 2, "%02x", payload_buffer[i]);
+    }
+
+    twr_atci_printfln("$SEND: %s", tmp);
     
-    twr_scheduler_plan_current_relative(10000);                                                     // Volání funkce co 10 s. Méně jak 10 s nedoporučuji.
+    twr_scheduler_plan_current_relative(SEND_DATA_INTERVAL);
+}
+
+void lora_callback(twr_cmwx1zzabz_t *self, twr_cmwx1zzabz_event_t event, void *event_param)
+{
+    if (event == TWR_CMWX1ZZABZ_EVENT_ERROR)
+    {
+        twr_led_set_mode(&led, TWR_LED_MODE_BLINK_FAST);
+    }
+    else if (event == TWR_CMWX1ZZABZ_EVENT_SEND_MESSAGE_START)
+    {
+        twr_led_set_mode(&led, TWR_LED_MODE_ON);
+
+        twr_scheduler_plan_relative(battery_measure_task_id, 20);
+    }
+    else if (event == TWR_CMWX1ZZABZ_EVENT_SEND_MESSAGE_DONE)
+    {
+        twr_led_set_mode(&led, TWR_LED_MODE_OFF);
+    }
+    else if (event == TWR_CMWX1ZZABZ_EVENT_READY)
+    {
+        twr_led_set_mode(&led, TWR_LED_MODE_OFF);
+    }
+    else if (event == TWR_CMWX1ZZABZ_EVENT_JOIN_SUCCESS)
+    {
+        twr_atci_printfln("$JOIN_OK");
+        twr_led_set_mode(&led, TWR_LED_MODE_OFF);
+    }
+    else if (event == TWR_CMWX1ZZABZ_EVENT_JOIN_ERROR)
+    {
+        twr_atci_printfln("$JOIN_ERROR");
+    }
+}
+
+void battery_measure_task(void *param)
+{
+    if (!twr_module_battery_measure())
+    {
+        twr_scheduler_plan_current_now();
+    }
 }
