@@ -32,6 +32,7 @@ twr_led_t led;
 twr_scheduler_task_id_t battery_measure_task_id;
 twr_scheduler_task_id_t measurement_task_id;
 twr_scheduler_task_id_t refresh_display_task_id;
+twr_scheduler_task_id_t send_lora_message_task_id;
 
 TWR_DATA_STREAM_FLOAT_BUFFER(sm_voltage_buffer, 8)
 TWR_DATA_STREAM_FLOAT_BUFFER(sm_temperature_buffer, (SEND_DATA_INTERVAL / MEASURE_INTERVAL))
@@ -44,6 +45,7 @@ twr_data_stream_t sm_humidity;
 twr_data_stream_t sm_co2;
 
 void lora_callback(twr_cmwx1zzabz_t *self, twr_cmwx1zzabz_event_t event, void *event_param);
+static void send_lora_message_task(void *param);
 
 uint8_t generate_8bit_crc(const uint8_t* data, uint16_t count) {
     uint16_t current_byte;
@@ -67,6 +69,7 @@ bool is_crc_correct(const uint8_t data, const uint8_t crc) {
 }
 
 bool scd41_send_single_shot_measurement_command() {
+    twr_log_debug("scd41_send_single_shot_measurement_command start");  
     uint8_t tx_buffer[2] = { 0x21, 0x9D };
 
     twr_i2c_transfer_t singleShotTransfer;
@@ -74,7 +77,10 @@ bool scd41_send_single_shot_measurement_command() {
     singleShotTransfer.buffer = tx_buffer;                  
     singleShotTransfer.length = sizeof(tx_buffer);                  
 
-    return twr_i2c_write(TWR_I2C_I2C0, &singleShotTransfer);
+    bool state = twr_i2c_write(TWR_I2C_I2C0, &singleShotTransfer);
+
+    twr_delay_us(20000);
+    return state;
 }
 
 void scd41_read_latest_measured_data(uint8_t *destination) {
@@ -88,16 +94,16 @@ void scd41_read_latest_measured_data(uint8_t *destination) {
 
     twr_i2c_read(TWR_I2C_I2C0, &readDataTransfer);
 
-    destination = rx_buffer;
+//    destination = &rx_buffer;
+    memcpy(destination, rx_buffer, sizeof(rx_buffer));
 }
 
 bool process_measured_data(uint8_t* measuredRawData) {
-    uint8_t measuredData[2];
     uint8_t expectedCrc;
     float value;
 
-    measuredData = { measuredRawData[0], measuredRawData[1] };
-    expectedCrc = generate_8bit_crc(measuredData, 2);
+    uint8_t measuredDataCo2[2] = { measuredRawData[0], measuredRawData[1] };
+    expectedCrc = generate_8bit_crc(measuredDataCo2, 2);
 
     if (is_crc_correct(expectedCrc, measuredRawData[2])) {
         value = (float)((int16_t)(measuredRawData[0] << 8 | measuredRawData[1]));  
@@ -107,8 +113,8 @@ bool process_measured_data(uint8_t* measuredRawData) {
         twr_data_stream_feed(&sm_co2, &value);
     }  
 
-    measuredData = { measuredRawData[3], measuredRawData[4] };
-    expectedCrc = generate_8bit_crc(measuredData, 2);
+    uint8_t measuredDataTemperature[2] = { measuredRawData[3], measuredRawData[4] };
+    expectedCrc = generate_8bit_crc(measuredDataTemperature, 2);
 
     if (is_crc_correct(expectedCrc, measuredRawData[5])) {
         value = (float)((int16_t)(measuredRawData[3] << 8 | measuredRawData[4]));   
@@ -119,8 +125,8 @@ bool process_measured_data(uint8_t* measuredRawData) {
         twr_data_stream_feed(&sm_temperature, &value);
     }
 
-    measuredData = { measuredRawData[6], measuredRawData[7] };
-    expectedCrc = generate_8bit_crc(measuredData, 2);
+    uint8_t measuredDataHumidity[2] = { measuredRawData[6], measuredRawData[7] };
+    expectedCrc = generate_8bit_crc(measuredDataHumidity, 2);
 
     if (is_crc_correct(expectedCrc, measuredRawData[8])) {
         value = (float)((int16_t)(measuredRawData[6] << 8 | measuredRawData[7]));      
@@ -139,6 +145,11 @@ void scd41_init(){
     twr_gpio_set_mode(TWR_GPIO_P1, TWR_GPIO_MODE_OUTPUT);                   
              
     twr_i2c_init(TWR_I2C_I2C0, TWR_I2C_SPEED_100_KHZ);
+    twr_delay_us(20);
+}
+
+bool scd41_is_turned_on(){
+    return twr_gpio_get_output(TWR_GPIO_P1);
 }
 
 static void scd41_turn_on(){
@@ -149,28 +160,32 @@ static void scd41_turn_off(){
     twr_gpio_set_output(TWR_GPIO_P1, 0);
 }
 
-static void scd41_set_event_handler(void (*event_handler)(void*, void *), void *event_param)
-{
-    _twr_module_battery.event_handler = event_handler;
-    _twr_module_battery.event_param = event_param;
-}
 
 static void measurement_task(void* param) {
-    (void) param;
+    twr_log_debug("measurement_task start");  
+    (void) param; 
+    static uint8_t measuredDataRaw[9];
 
-    scd41_turn_on();
+    if(!scd41_is_turned_on){
+        scd41_turn_on();
+    }
 
     if(scd41_send_single_shot_measurement_command()){
-        uint8_t[8] measuredDataRaw;
+        twr_log_debug("scd41_send_single_shot_measurement_command ok");  
 
-        scd41_read_latest_measured_data(&measuredDataRaw);
+        // todo: think about it
+        //memset(measuredDataRaw, 0xff, sizeof(measuredDataRaw));
 
-        if(!process_measured_data(&measuredData)){
-            twr_scheduler_plan_current_relative(10 * 1000);
+        scd41_read_latest_measured_data(measuredDataRaw);
+
+        // todo: if failed after X attemps, send error message, flag can be moved via params of fn
+        if(!process_measured_data(measuredDataRaw)){
+            twr_scheduler_plan_current_relative(3 * 1000);
         }
     };
     
-    scd41_turn_off();
+    // scd41_turn_off();
+    twr_log_debug("measurement_task end");
 
     twr_scheduler_plan_current_relative(MEASURE_INTERVAL);
     twr_scheduler_plan_now(refresh_display_task_id);
@@ -233,6 +248,7 @@ void lcd_event_handler(twr_module_lcd_event_t event, void *event_param) {
 void application_init(void)
 {
     twr_log_init(TWR_LOG_LEVEL_DUMP, TWR_LOG_TIMESTAMP_ABS);
+    // twr_log_init(TWR_LOG_LEVEL_OFF, TWR_LOG_TIMESTAMP_ABS);
     twr_log_debug("Init");
 
     twr_led_init(&led, TWR_GPIO_LED, false, 0);
@@ -243,8 +259,7 @@ void application_init(void)
 
     pgfx = twr_module_lcd_get_gfx();
     twr_gfx_set_font(pgfx, &twr_font_ubuntu_15);
-
-    refresh_display_task_id   = twr_scheduler_register(refresh_display_task, NULL, TWR_TICK_INFINITY);
+    refresh_display_task_id = twr_scheduler_register(refresh_display_task, NULL, TWR_TICK_INFINITY);
 
     twr_data_stream_init(&sm_voltage, 1, &sm_voltage_buffer);
     twr_data_stream_init(&sm_temperature, 1, &sm_temperature_buffer);
@@ -260,21 +275,14 @@ void application_init(void)
     twr_cmwx1zzabz_set_class(&lora, TWR_CMWX1ZZABZ_CONFIG_CLASS_A);
 
     scd41_init();
-    measurement_task_id   = twr_scheduler_register(measurement_task, NULL, TWR_TICK_INFINITY);
+    measurement_task_id = twr_scheduler_register(measurement_task, NULL, TWR_TICK_INFINITY);
+    send_lora_message_task_id = twr_scheduler_register(send_lora_message_task, NULL, TWR_TICK_INFINITY);
 
     twr_scheduler_plan_from_now(measurement_task_id, 5 * 1000);
     twr_log_debug("Init done");
 }
 
-void application_task(void)
-{
-    if (!twr_cmwx1zzabz_is_ready(&lora))
-    {
-        twr_scheduler_plan_current_relative(100);
-
-        return;
-    }
-
+static void send_lora_message_task(void *param){
     static uint8_t payload_buffer[9];
 
     memset(payload_buffer, 0xff, sizeof(payload_buffer));
@@ -339,6 +347,18 @@ void application_task(void)
     }
 
     twr_log_debug("$SEND: %s", tmp);
+}
+
+void application_task(void)
+{
+    if (!twr_cmwx1zzabz_is_ready(&lora))
+    {
+        twr_scheduler_plan_current_relative(100);
+
+        return;
+    }
+
+    twr_scheduler_plan_now(send_lora_message_task_id);
 
     twr_scheduler_plan_current_relative(SEND_DATA_INTERVAL);
 }
@@ -365,7 +385,7 @@ void lora_callback(twr_cmwx1zzabz_t *self, twr_cmwx1zzabz_event_t event, void *e
     }
     else if (event == TWR_CMWX1ZZABZ_EVENT_JOIN_SUCCESS)
     {
-        twr_log_debug("$JOIN_OK")
+        twr_log_debug("$JOIN_OK");
         twr_led_set_mode(&led, TWR_LED_MODE_OFF);
     }
     else if (event == TWR_CMWX1ZZABZ_EVENT_JOIN_ERROR)
