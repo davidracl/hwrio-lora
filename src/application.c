@@ -38,6 +38,7 @@ twr_scheduler_task_id_t write_sensor_data_id;
 twr_scheduler_task_id_t get_sensor_data_id;
 twr_scheduler_task_id_t measure_task_id; 
 twr_scheduler_task_id_t send_lora_message_task_id;
+twr_scheduler_task_id_t update_display_task_id;
 
 TWR_DATA_STREAM_FLOAT_BUFFER(sm_voltage_buffer, 8)
 TWR_DATA_STREAM_FLOAT_BUFFER(sm_temperature_buffer, (SEND_DATA_INTERVAL / MEASURE_INTERVAL))
@@ -54,6 +55,8 @@ uint8_t page_number = 1;
 void lora_callback(twr_cmwx1zzabz_t *self, twr_cmwx1zzabz_event_t event, void *event_param);
 static void measure_task(void *param);
 static void send_lora_message_task(void *param);
+static void update_display_task(void *param);
+
 
 uint8_t sensor_common_generate_crc(const uint8_t* data, uint16_t count) {                           // Kontrola CRC. Kód z datasheetu.
     uint16_t current_byte;
@@ -71,6 +74,65 @@ uint8_t sensor_common_generate_crc(const uint8_t* data, uint16_t count) {       
     }
     return crc;
 }
+
+static void update_display_task(void *param)
+{
+    if (!twr_gfx_display_is_ready(pgfx))
+    {
+        return;
+    }
+
+    twr_system_pll_enable();
+
+    //twr_module_lcd_clear();
+    twr_gfx_clear(pgfx);
+    twr_gfx_update(pgfx);
+    
+    if(page_number > 3) page_number = 1;
+    if(page_number < 1) page_number = 3; 
+
+    switch (page_number) {
+      case 1: {
+            char cstr[2];
+            float temperature_avg = NAN;
+            twr_data_stream_get_average(&sm_temperature, &temperature_avg);
+
+            if (!isnan(temperature_avg))
+            {
+                //int16_t temperature_i16 = (int16_t) (temperature_avg);
+
+                sprintf(cstr, "%.2f °C", temperature_avg);
+
+            }
+            twr_gfx_set_font(pgfx, &twr_font_ubuntu_28);    
+            twr_gfx_draw_string(pgfx, 14, 20, cstr, true);
+        break;
+      }
+        
+      case 2: {
+        char txt[11] = "2 tlacitko";
+        twr_gfx_draw_string(pgfx, 10, 5, txt, true);
+        twr_gfx_draw_line(pgfx, 0, 21, 128, 21, true);
+        break;
+      }
+        
+       case 3: {
+        char txt[11] = "3 tlacitko";
+        twr_gfx_draw_string(pgfx, 10, 5, txt, true);
+        twr_gfx_draw_line(pgfx, 0, 21, 128, 21, true);
+        break;
+       }
+    }
+
+    twr_gfx_draw_line(pgfx, 0, 1, 0, 1, true);
+
+    twr_gfx_draw_line(pgfx, 0, 113, 128, 113, 1);
+
+
+    twr_gfx_update(pgfx);   
+    twr_system_pll_disable(); 
+}
+
 
 bool firstWrite = true;
 
@@ -110,7 +172,7 @@ void get_sensor_data() {
     uint8_t crcCO2[2] = { rx_buffer[0], rx_buffer[1] };                                             // Uložení 2 bajtů pro crc checksum.
     uint8_t crcCO2Result = sensor_common_generate_crc(crcCO2, 2);                                   // Uložení výsledku CRC.
     if (crcCO2Result == rx_buffer[2]) {                                                             // Když CRC kontrola je shodná s přijatým CRC bajtem.
-        float value = (float)((int16_t)(rx_buffer[0] << 8 | rx_buffer[1]));   
+        float value = (float)((uint16_t)(rx_buffer[0] << 8 | rx_buffer[1]));   
         twr_data_stream_feed(&sm_co2, &value);
         twr_log_debug("CO2: %0.2f ppm", value);                                                // Výpis do konzoly.
     }           
@@ -121,7 +183,7 @@ void get_sensor_data() {
     uint8_t crcTemperature[2] = { rx_buffer[3], rx_buffer[4] };                                     // Totéž co výše akorát jiné bajty.
     uint8_t crcTemperatureResult = sensor_common_generate_crc(crcTemperature, 2);           
     if (crcTemperatureResult == rx_buffer[5]) {         
-        float value = (float)((int16_t)(rx_buffer[3] << 8 | rx_buffer[4]));           
+        float value = (float)((uint16_t)(rx_buffer[3] << 8 | rx_buffer[4]));           
         value = -45 + 175 * (value / 65535.0f);
         twr_data_stream_feed(&sm_temperature, &value);
         twr_log_debug("Teplota: %0.2f °C", value);         
@@ -133,83 +195,30 @@ void get_sensor_data() {
     uint8_t crcHumidity[2] = { rx_buffer[6], rx_buffer[7] };                                        // Totéž co výše akorát jiné bajty.
     uint8_t crcHumidityResult = sensor_common_generate_crc(crcHumidity, 2);         
     if (crcHumidityResult == rx_buffer[8]) {            
-        float value = (float)((int16_t)(rx_buffer[6] << 8 | rx_buffer[7]));          
-        value = value * 100.0f / 65535.0f;
-        twr_data_stream_feed(&sm_humidity, &value);
-        twr_log_debug("Vlhkost: %0.2f %%", value);
+        uint16_t value = ((uint16_t)(rx_buffer[6] << 8 | rx_buffer[7]));          
+        float value2 = value * 100.0f / 65535.0f;
+        twr_data_stream_feed(&sm_humidity, &value2);
+        twr_log_debug("Vlhkost: %0.2f %%", value2);
     }
     else {
         twr_log_debug("Vlhkost: Chyba při čtení dat. CRC checksum není správné.");
     }
 }
 
-void lcd_event_handler(twr_module_lcd_event_t event, void *event_param) {
-    
-    if (!twr_gfx_display_is_ready(pgfx))
-    {
-        return;
-    }
-
-    twr_system_pll_enable();
-
-    //twr_module_lcd_clear();
-    twr_gfx_clear(pgfx);
-    twr_gfx_update(pgfx);
-
+void lcd_event_handler(twr_module_lcd_event_t event, void *event_param)
+{
     if (event == TWR_MODULE_LCD_EVENT_LEFT_PRESS) {
         twr_log_debug("LEFT PRESS");
         page_number--;
+        twr_scheduler_plan_now(update_display_task_id);
     }
 
     if (event == TWR_MODULE_LCD_EVENT_RIGHT_PRESS) {
         twr_log_debug("RIGHT PRESS");
         page_number++;
+        twr_scheduler_plan_now(update_display_task_id);
 
     }
-    
-    if(page_number > 3) page_number = 1;
-    if(page_number < 1) page_number = 3; 
-
-    switch (page_number) {
-      case 1: {
-            char cstr[2];
-            float temperature_avg = NAN;
-            twr_data_stream_get_average(&sm_temperature, &temperature_avg);
-
-            if (!isnan(temperature_avg))
-            {
-                //int16_t temperature_i16 = (int16_t) (temperature_avg);
-
-                sprintf(cstr, "%.2f °C", temperature_avg);
-
-            }
-            twr_gfx_set_font(pgfx, &twr_font_ubuntu_28);    
-            twr_gfx_draw_string(pgfx, 14, 20, cstr, true);
-        break;
-      }
-        
-      case 2: {
-        char txt[] = "2 tlacitko";
-        twr_gfx_draw_string(pgfx, 10, 5, txt, true);
-        twr_gfx_draw_line(pgfx, 0, 21, 128, 21, true);
-        break;
-      }
-        
-       case 3: {
-        char txt[] = "3 tlacitko";
-        twr_gfx_draw_string(pgfx, 10, 5, txt, true);
-        twr_gfx_draw_line(pgfx, 0, 21, 128, 21, true);
-        break;
-       }
-    }
-
-    twr_gfx_draw_line(pgfx, 0, 1, 0, 1, true);
-
-    twr_gfx_draw_line(pgfx, 0, 113, 128, 113, 1);
-
-
-    twr_gfx_update(pgfx);   
-    twr_system_pll_disable(); 
 }
 
 void application_init(void)
@@ -249,7 +258,8 @@ void application_init(void)
     get_sensor_data_id   = twr_scheduler_register(get_sensor_data, NULL, TWR_TICK_INFINITY);        // Registrace tasku pro čtení dat.   
     measure_task_id   = twr_scheduler_register(measure_task, NULL, TWR_TICK_INFINITY);  
     send_lora_message_task_id   = twr_scheduler_register(send_lora_message_task, NULL, TWR_TICK_INFINITY); 
-    
+    update_display_task_id   = twr_scheduler_register(update_display_task, NULL, TWR_TICK_INFINITY); 
+
     twr_scheduler_plan_now(measure_task_id);
 }
 
