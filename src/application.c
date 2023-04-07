@@ -86,45 +86,61 @@ static void update_display_task(void *param)
 
     //twr_module_lcd_clear();
     twr_gfx_clear(pgfx);
-    twr_gfx_update(pgfx);
+    //twr_gfx_update(pgfx);
+
+    twr_gfx_set_font(pgfx, &twr_font_ubuntu_24);    
     
     if(page_number > 3) page_number = 1;
     if(page_number < 1) page_number = 3; 
 
     switch (page_number) {
       case 1: {
-            char cstr[2];
+            char str[16];
             float temperature_avg = NAN;
             twr_data_stream_get_average(&sm_temperature, &temperature_avg);
 
             if (!isnan(temperature_avg))
             {
-                //int16_t temperature_i16 = (int16_t) (temperature_avg);
-
-                sprintf(cstr, "%.2f °C", temperature_avg);
-
+                snprintf(str, sizeof(str), "%.1f °C", temperature_avg);
+                int w = twr_gfx_calc_string_width(pgfx, str);
+                twr_gfx_draw_string(pgfx, 64 - w / 2, 15, str, 1);
             }
-            twr_gfx_set_font(pgfx, &twr_font_ubuntu_28);    
-            twr_gfx_draw_string(pgfx, 14, 20, cstr, true);
+
+            float humidity_avg = NAN;
+            twr_data_stream_get_average(&sm_humidity, &humidity_avg);
+
+            if (!isnan(humidity_avg))
+            {
+                snprintf(str, sizeof(str), "%.1f %%", humidity_avg);
+                int w = twr_gfx_calc_string_width(pgfx, str);
+                twr_gfx_draw_string(pgfx, 64 - w / 2, 50, str, 1);
+            }
+
+            float co2_avg = NAN;
+            twr_data_stream_get_average(&sm_co2, &co2_avg);
+
+            if (!isnan(co2_avg))
+            {
+                snprintf(str, sizeof(str), "%.0f ppm", co2_avg);
+                int w = twr_gfx_calc_string_width(pgfx, str);
+                twr_gfx_draw_string(pgfx, 64 - w / 2, 75, str, 1);
+            }
+
         break;
       }
         
       case 2: {
         char txt[11] = "2 tlacitko";
         twr_gfx_draw_string(pgfx, 10, 5, txt, true);
-        twr_gfx_draw_line(pgfx, 0, 21, 128, 21, true);
         break;
       }
         
        case 3: {
         char txt[11] = "3 tlacitko";
         twr_gfx_draw_string(pgfx, 10, 5, txt, true);
-        twr_gfx_draw_line(pgfx, 0, 21, 128, 21, true);
         break;
        }
     }
-
-    twr_gfx_draw_line(pgfx, 0, 1, 0, 1, true);
 
     twr_gfx_draw_line(pgfx, 0, 113, 128, 113, 1);
 
@@ -203,6 +219,8 @@ void get_sensor_data() {
     else {
         twr_log_debug("Vlhkost: Chyba při čtení dat. CRC checksum není správné.");
     }
+
+    twr_scheduler_plan_now(update_display_task_id);
 }
 
 void lcd_event_handler(twr_module_lcd_event_t event, void *event_param)
