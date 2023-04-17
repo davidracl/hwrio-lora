@@ -38,7 +38,8 @@ twr_scheduler_task_id_t write_sensor_data_id;
 twr_scheduler_task_id_t get_sensor_data_id;
 twr_scheduler_task_id_t measure_task_id; 
 twr_scheduler_task_id_t send_lora_message_task_id;
-twr_scheduler_task_id_t update_display_task_id;
+twr_scheduler_task_id_t update_display_task_id; 
+twr_scheduler_task_id_t battery_measure_task_id;
 
 TWR_DATA_STREAM_FLOAT_BUFFER(sm_voltage_buffer, 8)
 TWR_DATA_STREAM_FLOAT_BUFFER(sm_temperature_buffer, (SEND_DATA_INTERVAL / MEASURE_INTERVAL))
@@ -56,7 +57,8 @@ void lora_callback(twr_cmwx1zzabz_t *self, twr_cmwx1zzabz_event_t event, void *e
 static void measure_task(void *param);
 static void send_lora_message_task(void *param);
 static void update_display_task(void *param);
-
+void battery_measure_task(void *param);
+void battery_event_handler(twr_module_battery_event_t event, void *event_param);
 
 uint8_t sensor_common_generate_crc(const uint8_t* data, uint16_t count) {                           // Kontrola CRC. Kód z datasheetu.
     uint16_t current_byte;
@@ -225,13 +227,13 @@ void get_sensor_data() {
 
 void lcd_event_handler(twr_module_lcd_event_t event, void *event_param)
 {
-    if (event == TWR_MODULE_LCD_EVENT_LEFT_PRESS) {
+    if (event == TWR_MODULE_LCD_EVENT_LEFT_CLICK) {
         twr_log_debug("LEFT PRESS");
         page_number--;
         twr_scheduler_plan_now(update_display_task_id);
     }
 
-    if (event == TWR_MODULE_LCD_EVENT_RIGHT_PRESS) {
+    if (event == TWR_MODULE_LCD_EVENT_RIGHT_CLICK) {
         twr_log_debug("RIGHT PRESS");
         page_number++;
         twr_scheduler_plan_now(update_display_task_id);
@@ -258,15 +260,20 @@ void application_init(void)
     pgfx = twr_module_lcd_get_gfx();
     twr_gfx_set_font(pgfx, &twr_font_ubuntu_15);    
 
+    //twr_module_battery_init();
+    //twr_module_battery_set_event_handler(battery_event_handler, NULL);
+    //battery_measure_task_id = twr_scheduler_register(battery_measure_task, NULL, 2020);
 
     twr_cmwx1zzabz_init(&lora, TWR_UART_UART1);
     twr_cmwx1zzabz_set_event_handler(&lora, lora_callback, NULL);
     twr_cmwx1zzabz_set_class(&lora, TWR_CMWX1ZZABZ_CONFIG_CLASS_A);
 
-    twr_gpio_init(TWR_GPIO_P1);                                                                     // Inicializace GPIO.
-    twr_gpio_set_mode(TWR_GPIO_P1, TWR_GPIO_MODE_OUTPUT);                   
-                    
-    twr_gpio_set_output(TWR_GPIO_P1, 1);                                                            // Napájení pro SCD41.
+    twr_gpio_init(TWR_GPIO_P1);
+    twr_gpio_set_mode(TWR_GPIO_P1, TWR_GPIO_MODE_OUTPUT);                     
+    twr_gpio_set_output(TWR_GPIO_P1, 1);               
+    
+    twr_gpio_init(TWR_GPIO_P0);
+    twr_gpio_set_mode(TWR_GPIO_P0, TWR_GPIO_MODE_INPUT);               
                     
     twr_i2c_init(TWR_I2C_I2C0, TWR_I2C_SPEED_100_KHZ);                                              // Inicializace I2C na 100 kHz.
                     
@@ -281,9 +288,57 @@ void application_init(void)
     twr_scheduler_plan_now(measure_task_id);
 }
 
+void battery_event_handler(twr_module_battery_event_t event, void *event_param)
+{
+    if (event == TWR_MODULE_BATTERY_EVENT_UPDATE)
+    {
+        float voltage = NAN;
+
+        twr_module_battery_get_voltage(&voltage);
+
+        twr_data_stream_feed(&sm_voltage, &voltage);
+    }
+}
+
+
+void battery_measure_task(void *param)
+{
+    if (!twr_module_battery_measure())
+    {
+        twr_scheduler_plan_current_now();
+    }
+}
+
+static void _twr_module_battery_adc_event_handler(twr_adc_channel_t channel, twr_adc_event_t event, void *param)
+{
+    (void) channel;
+    (void) param;
+    float result = NAN;
+
+    if (event == TWR_ADC_EVENT_DONE)
+    {
+
+        if (!twr_adc_async_get_voltage(TWR_ADC_CHANNEL_A0, &result))
+        {
+            result = NAN;
+            twr_log_debug("Battery:NAN");         
+        }
+
+        twr_log_debug("Battery: %0.2f V", result);         
+
+    }
+}
+
 static void measure_task(void *param)
 {
     twr_scheduler_plan_now(write_sensor_data_id);
+                    
+    twr_adc_init();
+    twr_adc_oversampling_set(TWR_ADC_CHANNEL_A0, TWR_ADC_OVERSAMPLING_256);
+    twr_adc_set_event_handler(TWR_ADC_CHANNEL_A0, _twr_module_battery_adc_event_handler, NULL);
+
+
+    twr_adc_async_measure(TWR_ADC_CHANNEL_A0);
 
     twr_scheduler_plan_current_relative(MEASURE_INTERVAL);
 }
@@ -367,7 +422,6 @@ void application_task(void)
     twr_scheduler_plan_now(send_lora_message_task_id);
 
     twr_scheduler_plan_current_relative(SEND_DATA_INTERVAL);
-    
 }
 
 void lora_callback(twr_cmwx1zzabz_t *self, twr_cmwx1zzabz_event_t event, void *event_param)
