@@ -94,52 +94,71 @@ static void update_display_task(void *param)
     
     if(page_number > 3) page_number = 1;
     if(page_number < 1) page_number = 3; 
+    
+    char str[16];
 
     switch (page_number) {
       case 1: {
-            char str[16];
             float temperature_avg = NAN;
             twr_data_stream_get_average(&sm_temperature, &temperature_avg);
+
+            snprintf(str, sizeof(str), "Teplota");
+            int w = twr_gfx_calc_string_width(pgfx, str);
+            twr_gfx_draw_string(pgfx, 64 - w / 2, 25, str, 1);
 
             if (!isnan(temperature_avg))
             {
                 snprintf(str, sizeof(str), "%.1f °C", temperature_avg);
                 int w = twr_gfx_calc_string_width(pgfx, str);
-                twr_gfx_draw_string(pgfx, 64 - w / 2, 15, str, 1);
+                twr_gfx_draw_string(pgfx, 64 - w / 2, 75, str, 1);
+            } else {
+                snprintf(str, sizeof(str), "- °C");
+                int w = twr_gfx_calc_string_width(pgfx, str);
+                twr_gfx_draw_string(pgfx, 64 - w / 2, 75, str, 1);
             }
-
+        break;
+      }
+        
+      case 2: {
             float humidity_avg = NAN;
             twr_data_stream_get_average(&sm_humidity, &humidity_avg);
+
+            snprintf(str, sizeof(str), "Rel. vlhkost");
+            int w = twr_gfx_calc_string_width(pgfx, str);
+            twr_gfx_draw_string(pgfx, 64 - w / 2, 25, str, 1);
 
             if (!isnan(humidity_avg))
             {
                 snprintf(str, sizeof(str), "%.1f %%", humidity_avg);
                 int w = twr_gfx_calc_string_width(pgfx, str);
-                twr_gfx_draw_string(pgfx, 64 - w / 2, 50, str, 1);
+                twr_gfx_draw_string(pgfx, 64 - w / 2, 75, str, 1);
+            } else {
+                snprintf(str, sizeof(str), "- %%");
+                int w = twr_gfx_calc_string_width(pgfx, str);
+                twr_gfx_draw_string(pgfx, 64 - w / 2, 75, str, 1);
             }
-
+        break;
+      }
+        
+       case 3: {
             float co2_avg = NAN;
             twr_data_stream_get_average(&sm_co2, &co2_avg);
+
+            snprintf(str, sizeof(str), "CO2");
+            int w = twr_gfx_calc_string_width(pgfx, str);
+            twr_gfx_draw_string(pgfx, 64 - w / 2, 25, str, 1);
 
             if (!isnan(co2_avg))
             {
                 snprintf(str, sizeof(str), "%.0f ppm", co2_avg);
                 int w = twr_gfx_calc_string_width(pgfx, str);
                 twr_gfx_draw_string(pgfx, 64 - w / 2, 75, str, 1);
+            } else {
+                snprintf(str, sizeof(str), "- ppm");
+                int w = twr_gfx_calc_string_width(pgfx, str);
+                twr_gfx_draw_string(pgfx, 64 - w / 2, 75, str, 1);
             }
-
-        break;
-      }
-        
-      case 2: {
-        char txt[11] = "2 tlacitko";
-        twr_gfx_draw_string(pgfx, 10, 5, txt, true);
-        break;
-      }
-        
-       case 3: {
-        char txt[11] = "3 tlacitko";
-        twr_gfx_draw_string(pgfx, 10, 5, txt, true);
+            
         break;
        }
     }
@@ -157,7 +176,7 @@ bool firstWrite = true;
 void write_sensor_data() {
 write_sensor_dataa:
     twr_i2c_transfer_t singleShot;
-    uint8_t tx_buffer[2] = { 0x21, 0x9D};                                                           // Buffer se dvěma bajty.
+    uint8_t tx_buffer[2] = { 0x21, 0x9D };                                                           // Buffer se dvěma bajty.
 
     singleShot.device_address = SCD41_ADDR;                                                         // Parametry pro strukturu transfer.
     singleShot.buffer = tx_buffer;                  
