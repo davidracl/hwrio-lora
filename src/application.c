@@ -45,6 +45,7 @@ twr_data_stream_t sm_humidity;
 twr_data_stream_t sm_co2;
 
 uint8_t page_number = 1;
+bool firstWrite = true;
 
 void lora_callback(twr_cmwx1zzabz_t *self, twr_cmwx1zzabz_event_t event, void *event_param);
 static void measure_task(void *param);
@@ -157,9 +158,6 @@ static void update_display_task(void *param)
     twr_gfx_update(pgfx);   
     twr_system_pll_disable(); 
 }
-
-
-bool firstWrite = true;
 
 void write_sensor_data() {
 write_sensor_data_sequence:
