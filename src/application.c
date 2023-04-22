@@ -35,7 +35,6 @@ twr_scheduler_task_id_t get_sensor_data_id;
 twr_scheduler_task_id_t measure_task_id; 
 twr_scheduler_task_id_t send_lora_message_task_id;
 twr_scheduler_task_id_t update_display_task_id; 
-twr_scheduler_task_id_t battery_measure_task_id;
 
 TWR_DATA_STREAM_FLOAT_BUFFER(sm_temperature_buffer, (SEND_DATA_INTERVAL / MEASURE_INTERVAL))
 TWR_DATA_STREAM_FLOAT_BUFFER(sm_humidity_buffer, (SEND_DATA_INTERVAL / MEASURE_INTERVAL))
@@ -51,7 +50,6 @@ void lora_callback(twr_cmwx1zzabz_t *self, twr_cmwx1zzabz_event_t event, void *e
 static void measure_task(void *param);
 static void send_lora_message_task(void *param);
 static void update_display_task(void *param);
-void battery_measure_task(void *param);
 
 uint8_t sensor_common_generate_crc(const uint8_t* data, uint16_t count) {
     uint16_t current_byte;
@@ -376,8 +374,6 @@ void lora_callback(twr_cmwx1zzabz_t *self, twr_cmwx1zzabz_event_t event, void *e
     }
     else if (event == TWR_CMWX1ZZABZ_EVENT_SEND_MESSAGE_START)
     {
-
-        // twr_scheduler_plan_relative(battery_measure_task_id, 20);
     }
     else if (event == TWR_CMWX1ZZABZ_EVENT_SEND_MESSAGE_DONE)
     {
