@@ -1,7 +1,3 @@
-// Tower Kit documentation https://tower.hardwario.com/
-// SDK API description https://sdk.hardwario.com/
-// Forum https://forum.hardwario.com/
-
 #include <application.h>
 
 #include <stdio.h>
@@ -11,12 +7,12 @@
 #include <twr_delay.h>
 
 
-#define SEND_DATA_INTERVAL          (1 * 60 * 1000)
-#define MEASURE_INTERVAL            (1 * 30 * 1000)
+#define SEND_DATA_INTERVAL          (20 * 60 * 1000)
+#define MEASURE_INTERVAL            (5 * 30 * 1000)
 
-#define SCD41_ADDR 0x62                                                                             // Adresa senzoru SCD41 na sběrnici I2C
+#define SCD41_ADDR 0x62
 
-#define CRC8_POLYNOMIAL 0x31                                                                        // Použito při výpočtu CRC.
+#define CRC8_POLYNOMIAL 0x31
 #define CRC8_INIT 0xFF
 
 enum {
@@ -26,7 +22,7 @@ enum {
 
 } header = HEADER_BOOT;
 
-twr_module_lcd_button_t btnL = TWR_MODULE_LCD_BUTTON_LEFT;                                          // Parametry k LCD.
+twr_module_lcd_button_t btnL = TWR_MODULE_LCD_BUTTON_LEFT;
 twr_module_lcd_button_t btnR = TWR_MODULE_LCD_BUTTON_RIGHT;
 twr_led_t lcdLed;
 twr_gfx_t *pgfx;
@@ -41,12 +37,10 @@ twr_scheduler_task_id_t send_lora_message_task_id;
 twr_scheduler_task_id_t update_display_task_id; 
 twr_scheduler_task_id_t battery_measure_task_id;
 
-TWR_DATA_STREAM_FLOAT_BUFFER(sm_voltage_buffer, 8)
 TWR_DATA_STREAM_FLOAT_BUFFER(sm_temperature_buffer, (SEND_DATA_INTERVAL / MEASURE_INTERVAL))
 TWR_DATA_STREAM_FLOAT_BUFFER(sm_humidity_buffer, (SEND_DATA_INTERVAL / MEASURE_INTERVAL))
 TWR_DATA_STREAM_FLOAT_BUFFER(sm_co2_buffer, (SEND_DATA_INTERVAL / MEASURE_INTERVAL))
 
-twr_data_stream_t sm_voltage;
 twr_data_stream_t sm_temperature;
 twr_data_stream_t sm_humidity;
 twr_data_stream_t sm_co2;
@@ -58,9 +52,8 @@ static void measure_task(void *param);
 static void send_lora_message_task(void *param);
 static void update_display_task(void *param);
 void battery_measure_task(void *param);
-void battery_event_handler(twr_module_battery_event_t event, void *event_param);
 
-uint8_t sensor_common_generate_crc(const uint8_t* data, uint16_t count) {                           // Kontrola CRC. Kód z datasheetu.
+uint8_t sensor_common_generate_crc(const uint8_t* data, uint16_t count) {
     uint16_t current_byte;
     uint8_t crc = CRC8_INIT;
     uint8_t crc_bit;
@@ -86,9 +79,7 @@ static void update_display_task(void *param)
 
     twr_system_pll_enable();
 
-    //twr_module_lcd_clear();
     twr_gfx_clear(pgfx);
-    //twr_gfx_update(pgfx);
 
     twr_gfx_set_font(pgfx, &twr_font_ubuntu_24);    
     
@@ -165,7 +156,6 @@ static void update_display_task(void *param)
 
     twr_gfx_draw_line(pgfx, 0, 113, 128, 113, 1);
 
-
     twr_gfx_update(pgfx);   
     twr_system_pll_disable(); 
 }
@@ -197,36 +187,36 @@ write_sensor_dataa:
 }
 
 void get_sensor_data() {
-    twr_i2c_transfer_t readData;                                                                    // Struktura pro čtení dat.
-    uint8_t rx_buffer[9];                                                                           // Buffer pro příjem 9 bajtů.
+    twr_i2c_transfer_t readData;
+    uint8_t rx_buffer[9];
 
-    readData.device_address = SCD41_ADDR;                                                           // Adresa SCD modulu.
+    readData.device_address = SCD41_ADDR;
     readData.buffer = rx_buffer;            
     readData.length = sizeof(rx_buffer);            
 
-    twr_i2c_read(TWR_I2C_I2C0, &readData);                                                          // Čtení dat z I2C linky.
+    twr_i2c_read(TWR_I2C_I2C0, &readData);
 
-    uint8_t crcCO2[2] = { rx_buffer[0], rx_buffer[1] };                                             // Uložení 2 bajtů pro crc checksum.
-    uint8_t crcCO2Result = sensor_common_generate_crc(crcCO2, 2);                                   // Uložení výsledku CRC.
-    if (crcCO2Result == rx_buffer[2]) {                                                             // Když CRC kontrola je shodná s přijatým CRC bajtem.
+    uint8_t crcCO2[2] = { rx_buffer[0], rx_buffer[1] };
+    uint8_t crcCO2Result = sensor_common_generate_crc(crcCO2, 2);
+    if (crcCO2Result == rx_buffer[2]) {
         float value = (float)((uint16_t)(rx_buffer[0] << 8 | rx_buffer[1]));   
         twr_data_stream_feed(&sm_co2, &value);
-        twr_log_debug("CO2: %0.2f ppm", value);                                                // Výpis do konzoly.
+        twr_log_debug("CO2: %0.2f ppm", value);
     }           
-    else {                                                                                          // V případě, že CRC nesouhlasi.
-        twr_log_debug("CO2: Chyba při čtení dat. CRC checksum není správné.");          
+    else {
+        twr_log_debug("CO2: CRC check invalid");          
     }           
 
-    uint8_t crcTemperature[2] = { rx_buffer[3], rx_buffer[4] };                                     // Totéž co výše akorát jiné bajty.
+    uint8_t crcTemperature[2] = { rx_buffer[3], rx_buffer[4] };
     uint8_t crcTemperatureResult = sensor_common_generate_crc(crcTemperature, 2);           
     if (crcTemperatureResult == rx_buffer[5]) {         
         float value = (float)((uint16_t)(rx_buffer[3] << 8 | rx_buffer[4]));           
         value = -45 + 175 * (value / 65535.0f);
         twr_data_stream_feed(&sm_temperature, &value);
-        twr_log_debug("Teplota: %0.2f °C", value);         
+        twr_log_debug("Temperature: %0.2f °C", value);         
     }           
     else {          
-        twr_log_debug("Teplota: Chyba při čtení dat. CRC checksum není správné.");          
+        twr_log_debug("Temperature: CRC check invalid");          
     }           
 
     uint8_t crcHumidity[2] = { rx_buffer[6], rx_buffer[7] };                                        // Totéž co výše akorát jiné bajty.
@@ -235,10 +225,10 @@ void get_sensor_data() {
         uint16_t value = ((uint16_t)(rx_buffer[6] << 8 | rx_buffer[7]));          
         float value2 = value * 100.0f / 65535.0f;
         twr_data_stream_feed(&sm_humidity, &value2);
-        twr_log_debug("Vlhkost: %0.2f %%", value2);
+        twr_log_debug("Humidity: %0.2f %%", value2);
     }
     else {
-        twr_log_debug("Vlhkost: Chyba při čtení dat. CRC checksum není správné.");
+        twr_log_debug("Humidity: CRC check invalid");
     }
 
     twr_scheduler_plan_now(update_display_task_id);
@@ -264,24 +254,19 @@ void application_init(void)
 {
     twr_log_init(TWR_LOG_LEVEL_DUMP, TWR_LOG_TIMESTAMP_ABS);
 
-    twr_data_stream_init(&sm_voltage, 1, &sm_voltage_buffer);
     twr_data_stream_init(&sm_temperature, 1, &sm_temperature_buffer);
     twr_data_stream_init(&sm_humidity, 1, &sm_humidity_buffer);
     twr_data_stream_init(&sm_co2, 1, &sm_co2_buffer);
 
-    const twr_led_driver_t* driver = twr_module_lcd_get_led_driver();                               // LED na LCD modulu.
-    twr_led_init_virtual(&lcdLed, TWR_MODULE_LCD_LED_BLUE, driver, 1);                              // Inicializace LED.
+    const twr_led_driver_t* driver = twr_module_lcd_get_led_driver();
+    twr_led_init_virtual(&lcdLed, TWR_MODULE_LCD_LED_BLUE, driver, 1);
 
-    twr_module_lcd_init();                                                                          // Inicializace LCD.
+    twr_module_lcd_init();
 
     twr_module_lcd_set_event_handler(lcd_event_handler, NULL);
 
     pgfx = twr_module_lcd_get_gfx();
     twr_gfx_set_font(pgfx, &twr_font_ubuntu_15);    
-
-    //twr_module_battery_init();
-    //twr_module_battery_set_event_handler(battery_event_handler, NULL);
-    //battery_measure_task_id = twr_scheduler_register(battery_measure_task, NULL, 2020);
 
     twr_cmwx1zzabz_init(&lora, TWR_UART_UART1);
     twr_cmwx1zzabz_set_event_handler(&lora, lora_callback, NULL);
@@ -307,79 +292,20 @@ void application_init(void)
     twr_scheduler_plan_now(measure_task_id);
 }
 
-void battery_event_handler(twr_module_battery_event_t event, void *event_param)
-{
-    if (event == TWR_MODULE_BATTERY_EVENT_UPDATE)
-    {
-        float voltage = NAN;
-
-        twr_module_battery_get_voltage(&voltage);
-
-        twr_data_stream_feed(&sm_voltage, &voltage);
-    }
-}
-
-
-void battery_measure_task(void *param)
-{
-    if (!twr_module_battery_measure())
-    {
-        twr_scheduler_plan_current_now();
-    }
-}
-
-static void _twr_module_battery_adc_event_handler(twr_adc_channel_t channel, twr_adc_event_t event, void *param)
-{
-    (void) channel;
-    (void) param;
-    float result = NAN;
-
-    if (event == TWR_ADC_EVENT_DONE)
-    {
-
-        if (!twr_adc_async_get_voltage(TWR_ADC_CHANNEL_A0, &result))
-        {
-            result = NAN;
-            twr_log_debug("Battery:NAN");         
-        }
-
-        twr_log_debug("Battery: %0.2f V", result);         
-
-    }
-}
 
 static void measure_task(void *param)
 {
     twr_scheduler_plan_now(write_sensor_data_id);
-                    
-    twr_adc_init();
-    twr_adc_oversampling_set(TWR_ADC_CHANNEL_A0, TWR_ADC_OVERSAMPLING_256);
-    twr_adc_set_event_handler(TWR_ADC_CHANNEL_A0, _twr_module_battery_adc_event_handler, NULL);
-
-
-    twr_adc_async_measure(TWR_ADC_CHANNEL_A0);
 
     twr_scheduler_plan_current_relative(MEASURE_INTERVAL);
 }
 
 static void send_lora_message_task(void *param){
-    static uint8_t payload_buffer[9];
+    static uint8_t payload_buffer[7];
 
     memset(payload_buffer, 0xff, sizeof(payload_buffer));
 
     payload_buffer[0] = header;
-
-    float battery_voltage_avg = NAN;
-
-    twr_data_stream_get_average(&sm_voltage, &battery_voltage_avg);
-
-    if (!isnan(battery_voltage_avg))
-    {
-        int16_t battery_i16 = (int16_t) (battery_voltage_avg);
-
-        payload_buffer[1] = battery_i16 >> 8;
-        payload_buffer[2] = battery_i16;
-    }
 
     float temperature_avg = NAN;
 
@@ -389,8 +315,8 @@ static void send_lora_message_task(void *param){
     {
         int16_t temperature_i16 = (int16_t) (temperature_avg);
 
-        payload_buffer[3] = temperature_i16 >> 8;
-        payload_buffer[4] = temperature_i16;
+        payload_buffer[1] = temperature_i16 >> 8;
+        payload_buffer[2] = temperature_i16;
     }
 
     float humidity_avg = NAN;
@@ -401,8 +327,8 @@ static void send_lora_message_task(void *param){
     {
         int16_t humidity_i16 = (int16_t) (humidity_avg);
 
-        payload_buffer[5] = humidity_i16 >> 8;
-        payload_buffer[6] = humidity_i16;
+        payload_buffer[3] = humidity_i16 >> 8;
+        payload_buffer[4] = humidity_i16;
     }
 
     float co2_avg = NAN;
@@ -412,8 +338,8 @@ static void send_lora_message_task(void *param){
     if (!isnan(co2_avg))
     {
         uint16_t co2_i16 = (uint16_t) (co2_avg);
-        payload_buffer[7] = co2_i16 >> 8;
-        payload_buffer[8] = co2_i16;
+        payload_buffer[5] = co2_i16 >> 8;
+        payload_buffer[6] = co2_i16;
     }
 
     header = HEADER_UPDATE;
