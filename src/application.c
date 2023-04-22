@@ -162,7 +162,7 @@ static void update_display_task(void *param)
 bool firstWrite = true;
 
 void write_sensor_data() {
-write_sensor_dataa:
+write_sensor_data_sequence:
     twr_i2c_transfer_t singleShot;
     uint8_t tx_buffer[2] = { 0x21, 0x9D };                                                           // Buffer se dvěma bajty.
 
@@ -178,9 +178,9 @@ write_sensor_dataa:
     else {
         if(firstWrite){
             firstWrite = false;
-            goto write_sensor_dataa;
+            goto write_sensor_data_sequence;
         }
-        twr_log_debug("Chyba při zápisu dat na I2C.");  
+        twr_log_debug("I2C failed");  
     }
 }
 
