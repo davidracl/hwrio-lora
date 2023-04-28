@@ -37,6 +37,7 @@ twr_scheduler_task_id_t get_sensor_data_task_id;
 twr_scheduler_task_id_t measure_task_id;
 twr_scheduler_task_id_t send_lora_message_task_id;
 twr_scheduler_task_id_t update_display_task_id;
+twr_scheduler_task_id_t calibration_task_id;
 
 TWR_DATA_STREAM_FLOAT_BUFFER(sm_temperature_buffer, MAX_BUFFER_SIZE)
 TWR_DATA_STREAM_FLOAT_BUFFER(sm_humidity_buffer, MAX_BUFFER_SIZE)
@@ -45,15 +46,28 @@ TWR_DATA_STREAM_FLOAT_BUFFER(sm_co2_buffer, MAX_BUFFER_SIZE)
 twr_data_stream_t sm_temperature;
 twr_data_stream_t sm_humidity;
 twr_data_stream_t sm_co2;
-float previousCo2Value = 0;
 
 uint8_t page_number = 1;
 bool firstWrite = true;
+bool shouldClearBuffers = false;
+
+typedef struct
+{
+    uint16_t altitude;
+    uint16_t co2_target;
+    float temperature_offset;
+} calibration_settings_t;
+
+bool calibrationMode = false;
+calibration_settings_t calibration_setting;
 
 void lora_callback(twr_cmwx1zzabz_t *self, twr_cmwx1zzabz_event_t event, void *event_param);
 static void measure_task(void *param);
 static void send_lora_message_task(void *param);
 static void update_display_task(void *param);
+static void calibration_task(void *param);
+static void update_display_task_measuring();
+static void update_display_task_calibration();
 
 uint8_t sensor_common_generate_crc(const uint8_t *data, uint16_t count)
 {
@@ -75,6 +89,12 @@ uint8_t sensor_common_generate_crc(const uint8_t *data, uint16_t count)
     return crc;
 }
 
+static void clearBuffers(){
+    twr_data_stream_reset(&sm_temperature);
+    twr_data_stream_reset(&sm_humidity);
+    twr_data_stream_reset(&sm_co2);
+}
+
 static void update_display_task(void *param)
 {
     if (!twr_gfx_display_is_ready(pgfx))
@@ -88,8 +108,87 @@ static void update_display_task(void *param)
 
     twr_gfx_set_font(pgfx, &twr_font_ubuntu_24);
 
+    if(calibrationMode == true) {
+        update_display_task_calibration();
+    } else {
+        update_display_task_measuring();
+    }
+
+    twr_gfx_update(pgfx);
+    twr_system_pll_disable();
+}
+
+static void update_display_task_calibration(){
+    char str[20];
+
+    snprintf(str, sizeof(str), "Kalibrace");
+    int w = twr_gfx_calc_string_width(pgfx, str);
+    twr_gfx_draw_string(pgfx, 64 - w / 2, 10, str, 1);
+
+    twr_gfx_set_font(pgfx, &twr_font_ubuntu_15);
+    switch (page_number)
+    {
+
+    case 1:
+    {
+        snprintf(str, sizeof(str), "CO2 target");
+        w = twr_gfx_calc_string_width(pgfx, str);
+        twr_gfx_draw_string(pgfx, 64 - w / 2, 30, str, 1);
+
+        snprintf(str, sizeof(str), "%d ppm", calibration_setting.co2_target);
+        w = twr_gfx_calc_string_width(pgfx, str);
+        twr_gfx_draw_string(pgfx, 64 - w / 2, 60, str, 1);
+        break;
+    }
+
+    case 2:
+    {
+        snprintf(str, sizeof(str), "Nadmorska vyska");
+        w = twr_gfx_calc_string_width(pgfx, str);
+        twr_gfx_draw_string(pgfx, 64 - w / 2, 30, str, 1);
+
+        snprintf(str, sizeof(str), "%d m", calibration_setting.altitude);
+        w = twr_gfx_calc_string_width(pgfx, str);
+        twr_gfx_draw_string(pgfx, 64 - w / 2, 60, str, 1);
+        break;
+    }
+
+    case 3:
+    {
+        snprintf(str, sizeof(str), "Offset teploty");
+        w = twr_gfx_calc_string_width(pgfx, str);
+        twr_gfx_draw_string(pgfx, 64 - w / 2, 30, str, 1);
+
+        snprintf(str, sizeof(str), "%.1f °C", calibration_setting.temperature_offset);
+        w = twr_gfx_calc_string_width(pgfx, str);
+        twr_gfx_draw_string(pgfx, 64 - w / 2, 60, str, 1);
+        break;
+    }
+
+    case 4:
+    {
+        snprintf(str, sizeof(str), "Zacit kalibraci?");
+        w = twr_gfx_calc_string_width(pgfx, str);
+        twr_gfx_draw_string(pgfx, 64 - w / 2, 60, str, 1);
+        break;
+    }
+
+    case 5:
+    {
+        snprintf(str, sizeof(str), "Probiha kalibrace");
+        w = twr_gfx_calc_string_width(pgfx, str);
+        twr_gfx_draw_string(pgfx, 64 - w / 2, 60, str, 1);
+        twr_scheduler_plan_now(calibration_task_id);
+        break;
+    }
+    }
+}
+
+static void update_display_task_measuring(){
+    
     if (page_number > 4)
         page_number = 1;
+
     if (page_number < 1)
         page_number = 4;
 
@@ -219,10 +318,8 @@ static void update_display_task(void *param)
         break;
     }
     }
-
-    twr_gfx_update(pgfx);
-    twr_system_pll_disable();
 }
+
 
 void write_sensor_data_task()
 {
@@ -259,6 +356,11 @@ void get_sensor_data_task()
 {
     twr_scheduler_plan_now(update_display_task_id);
 
+    if(shouldClearBuffers){
+        clearBuffers();
+        shouldClearBuffers = false;
+    }
+
     twr_i2c_transfer_t readData;
     uint8_t rx_buffer[9];
 
@@ -272,14 +374,16 @@ void get_sensor_data_task()
     uint8_t crcCO2Result = sensor_common_generate_crc(crcCO2, 2);
     if (crcCO2Result == rx_buffer[2])
     {
+        float previousCo2Value = NAN;
+        twr_data_stream_get_last(&sm_co2, &previousCo2Value);
+
         float value = (float)((uint16_t)(rx_buffer[0] << 8 | rx_buffer[1]));
         twr_data_stream_feed(&sm_co2, &value);
         twr_log_debug("CO2: %0.2f ppm", value);
  
-        if(isCo2ChangingFast(previousCo2Value, value)){
+        if(!isnan(previousCo2Value) && isCo2ChangingFast(previousCo2Value, value)){
             twr_scheduler_plan_now(send_lora_message_task_id);
         }
-        previousCo2Value = value;
     }
     else
     {
@@ -324,14 +428,76 @@ void lcd_event_handler(twr_module_lcd_event_t event, void *event_param)
     if (event == TWR_MODULE_LCD_EVENT_LEFT_CLICK)
     {
         twr_log_debug("LEFT PRESS");
-        page_number--;
+        if(calibrationMode == false){
+            page_number--;
+        } else {
+            if(page_number == 1){
+                calibration_setting.co2_target -= 1;
+            } else if (page_number == 2){
+                calibration_setting.altitude -= 50;
+            } else if (page_number == 3){
+                calibration_setting.temperature_offset -= 0.1;
+            }
+        }
+
         twr_scheduler_plan_now(update_display_task_id);
     }
 
     if (event == TWR_MODULE_LCD_EVENT_RIGHT_CLICK)
     {
         twr_log_debug("RIGHT PRESS");
-        page_number++;
+        if(calibrationMode == false){
+            page_number++;
+        } else {
+            if(page_number == 1){
+                calibration_setting.co2_target += 1;
+            } else if (page_number == 2){
+                calibration_setting.altitude += 50;
+            } else if (page_number == 3){
+                calibration_setting.temperature_offset += 0.1;
+            }
+        }
+
+        twr_scheduler_plan_now(update_display_task_id);
+    }
+
+    if (event == TWR_MODULE_LCD_EVENT_BOTH_HOLD)
+    {
+        twr_log_debug("BOTH HOLD");
+        if(calibrationMode == false){
+            page_number = 1;
+            calibration_setting.co2_target = 440;
+            calibration_setting.altitude = 0;
+            calibration_setting.temperature_offset = 0;
+            calibrationMode = true;
+        } else {
+            calibrationMode = false;
+            shouldClearBuffers = true;
+            twr_scheduler_plan_now(measure_task_id);
+        }
+
+        twr_scheduler_plan_now(update_display_task_id);
+    }
+
+    if (event == TWR_MODULE_LCD_EVENT_LEFT_HOLD)
+    {
+        twr_log_debug("LEFT HOLD");
+        if(calibrationMode == true){
+            if(page_number == 1) return;
+            page_number--;
+        }
+
+        twr_scheduler_plan_now(update_display_task_id);
+    }
+
+    if (event == TWR_MODULE_LCD_EVENT_RIGHT_HOLD)
+    {
+        twr_log_debug("RIGHT HOLD");
+        if(calibrationMode == true){
+            if(page_number == 5) return;
+            page_number++;
+        }
+
         twr_scheduler_plan_now(update_display_task_id);
     }
 }
@@ -374,15 +540,17 @@ void application_init(void)
     measure_task_id = twr_scheduler_register(measure_task, NULL, TWR_TICK_INFINITY);
     send_lora_message_task_id = twr_scheduler_register(send_lora_message_task, NULL, TWR_TICK_INFINITY);
     update_display_task_id = twr_scheduler_register(update_display_task, NULL, TWR_TICK_INFINITY);
+    calibration_task_id = twr_scheduler_register(calibration_task, NULL, TWR_TICK_INFINITY);
 }
 
 static void measure_task(void *param)
 {
+    if(calibrationMode) return;
+
     twr_scheduler_plan_now(write_sensor_data_task_id);
 
     twr_scheduler_plan_current_relative(MEASURE_INTERVAL);
 }
-    
 
 static void send_lora_message_task(void *param)
 {
@@ -437,9 +605,7 @@ static void send_lora_message_task(void *param)
     }
     
     if(header == HEADER_UPDATE){
-        twr_data_stream_reset(&sm_temperature);
-        twr_data_stream_reset(&sm_humidity);
-        twr_data_stream_reset(&sm_co2);
+        shouldClearBuffers = true;
     }
 
     header = HEADER_UPDATE;
@@ -453,7 +619,6 @@ static void send_lora_message_task(void *param)
     }
 
     twr_log_debug("$SEND: %s", tmp);
-
 }
 
 void application_task(void)
@@ -464,8 +629,318 @@ void application_task(void)
 
         return;
     }
+    
+    get_automatic_self_calibration_state();
+    get_sensor_altitude();
+    get_sensor_temperature_offset();
 
+    reinit_settings_scd41();
+
+    twr_scheduler_plan_now(send_lora_message_task_id);
     twr_scheduler_plan_now(measure_task_id);
+}
+
+void reinit_settings_scd41(){
+    twr_log_debug("$REINIT_SETTINGS_SCD41");
+
+    twr_i2c_transfer_t transfer;
+    uint8_t tx_buffer[5] = {0x36, 0x46};
+
+    transfer.device_address = SCD41_ADDR;
+    transfer.buffer = tx_buffer;
+    transfer.length = sizeof(tx_buffer);
+
+    bool res = twr_i2c_write(TWR_I2C_I2C0, &transfer);
+
+    twr_delay_us(20000);
+}
+
+
+void persist_settings(){
+    twr_i2c_transfer_t transfer;
+    uint8_t tx_buffer[5] = {0x36, 0x15};
+
+    transfer.device_address = SCD41_ADDR;
+    transfer.buffer = tx_buffer;
+    transfer.length = sizeof(tx_buffer);
+
+    bool res = twr_i2c_write(TWR_I2C_I2C0, &transfer);
+
+    // sleep 800 ms
+    for (size_t i = 0; i < 13; i++)
+    {
+        twr_delay_us(61539);
+    }
+}
+
+void perform_forced_recalibration()
+{
+    twr_log_debug("$PERFORM_FOCED_RECALIBRATION START");
+
+    twr_i2c_transfer_t transfer;
+
+    uint8_t tx_buffer[5] = {0x36, 0x2f, 0x01, 0xb8, 0x73}; // 440 ppm
+
+    int16_t co2_target = (int16_t)(calibration_setting.co2_target);
+    uint8_t inputParameters[] = { (uint8_t)(co2_target >> 8), (uint8_t)co2_target };
+    tx_buffer[2] = inputParameters[0];
+    tx_buffer[3] = inputParameters[1];
+    tx_buffer[4] = sensor_common_generate_crc(inputParameters, 2);
+
+    transfer.device_address = SCD41_ADDR;
+    transfer.buffer = tx_buffer;
+    transfer.length = sizeof(tx_buffer);
+
+    bool res = twr_i2c_write(TWR_I2C_I2C0, &transfer);
+
+    if (res == true)
+    {
+        twr_log_debug("I2C OK");
+    }
+    else
+    {
+        twr_log_debug("I2C FAIL");
+    }
+
+    // sleep 400 ms
+    for (size_t i = 0; i < 7; i++)
+    {
+        twr_delay_us(57143);
+    }
+
+    twr_i2c_transfer_t readData;
+    uint8_t rx_buffer[3];
+
+    readData.device_address = SCD41_ADDR;
+    readData.buffer = rx_buffer;
+    readData.length = sizeof(rx_buffer);
+
+    twr_i2c_read(TWR_I2C_I2C0, &readData);
+
+    char tmp[sizeof(rx_buffer) * 2 + 1];
+    for (size_t i = 0; i < sizeof(rx_buffer); i++)
+    {
+        sprintf(tmp + i * 2, "%02x", rx_buffer[i]);
+    }
+
+    twr_log_debug("$PERFORM_FORCED_CALIBRATION: %s", tmp);
+}
+
+void set_automatic_self_calibration_disabled()
+{
+    twr_i2c_transfer_t transfer;
+    uint8_t tx_buffer[5] = {0x24, 0x16, 0x00, 0x00, 0x81};
+
+    transfer.device_address = SCD41_ADDR;
+    transfer.buffer = tx_buffer;
+    transfer.length = sizeof(tx_buffer);
+
+    bool res = twr_i2c_write(TWR_I2C_I2C0, &transfer);
+
+    if (res == true)
+    {
+        twr_log_debug("I2C OK");
+    }
+    else
+    {
+        twr_log_debug("I2C FAIL");
+    }
+
+    twr_delay_us(1000);
+}
+
+
+void get_automatic_self_calibration_state()
+{
+    twr_i2c_transfer_t transfer;
+    uint8_t tx_buffer[2] = {0x23, 0x13};
+
+    transfer.device_address = SCD41_ADDR;
+    transfer.buffer = tx_buffer;
+    transfer.length = sizeof(tx_buffer);
+
+    bool res = twr_i2c_write(TWR_I2C_I2C0, &transfer);
+
+    if (res == true){
+        twr_log_debug("I2C OK");
+    } else {
+        twr_log_debug("I2C FAIL");
+    }
+
+    twr_delay_us(1000);
+
+    twr_i2c_transfer_t readData;
+    uint8_t rx_buffer[3];
+
+    readData.device_address = SCD41_ADDR;
+    readData.buffer = rx_buffer;
+    readData.length = sizeof(rx_buffer);
+
+    twr_i2c_read(TWR_I2C_I2C0, &readData);
+
+    char tmp[sizeof(rx_buffer) * 2 + 1];
+    for (size_t i = 0; i < sizeof(rx_buffer); i++)
+    {
+        sprintf(tmp + i * 2, "%02x", rx_buffer[i]);
+    }
+
+    twr_log_debug("$SELF_CALIBRATION_STATE: %s", tmp);
+}
+
+void write_sensor_temperature_offset()
+{
+    twr_i2c_transfer_t transfer;
+    uint8_t tx_buffer[5] = {0x24, 0x1d, 0x00, 0x00, 0x81};
+    //uint8_t tx_buffer[5] = {0x24, 0x1d, 0x05, 0xda, 0x29};
+
+    int16_t temperature_offset = (int16_t)(calibration_setting.temperature_offset * 65535.0f / 175.0f);
+    uint8_t inputParameters[] = { (uint8_t)(temperature_offset >> 8), (uint8_t)temperature_offset };
+    tx_buffer[2] = inputParameters[0];
+    tx_buffer[3] = inputParameters[1];
+    tx_buffer[4] = sensor_common_generate_crc(inputParameters, 2);
+
+    transfer.device_address = SCD41_ADDR;
+    transfer.buffer = tx_buffer;
+    transfer.length = sizeof(tx_buffer);
+
+    bool res = twr_i2c_write(TWR_I2C_I2C0, &transfer);
+
+    if (res == true)
+    {
+        twr_log_debug("I2C OK");
+    }
+    else
+    {
+        twr_log_debug("I2C FAIL");
+    }
+
+    twr_delay_us(1000);
+}
+
+void get_sensor_temperature_offset()
+{
+    twr_i2c_transfer_t transfer;
+    uint8_t tx_buffer[2] = {0x23, 0x18};
+
+    transfer.device_address = SCD41_ADDR;
+    transfer.buffer = tx_buffer;
+    transfer.length = sizeof(tx_buffer);
+
+    bool res = twr_i2c_write(TWR_I2C_I2C0, &transfer);
+
+    if (res == true){
+        twr_log_debug("I2C OK");
+    } else {
+        twr_log_debug("I2C FAIL");
+    }
+
+    twr_delay_us(1000);
+
+    twr_i2c_transfer_t readData;
+    uint8_t rx_buffer[3];
+
+    readData.device_address = SCD41_ADDR;
+    readData.buffer = rx_buffer;
+    readData.length = sizeof(rx_buffer);
+
+    twr_i2c_read(TWR_I2C_I2C0, &readData);
+
+    char tmp[sizeof(rx_buffer) * 2 + 1];
+    for (size_t i = 0; i < sizeof(rx_buffer); i++)
+    {
+        sprintf(tmp + i * 2, "%02x", rx_buffer[i]);
+    }
+
+    twr_log_debug("$SENSOR_TEMPERATURE_OFFSET: %s", tmp);
+}
+
+void write_sensor_altitude()
+{
+    twr_i2c_transfer_t transfer;
+    uint8_t tx_buffer[5] = {0x24, 0x27, 0x19, 0x00, 0x2C};
+
+    int16_t altitude = (int16_t)(calibration_setting.altitude);
+    uint8_t inputParameters[] = { (uint8_t)(altitude >> 8), (uint8_t)altitude };
+    tx_buffer[2] = inputParameters[0];
+    tx_buffer[3] = inputParameters[1];
+    tx_buffer[4] = sensor_common_generate_crc(inputParameters, 2);
+
+    transfer.device_address = SCD41_ADDR;
+    transfer.buffer = tx_buffer;
+    transfer.length = sizeof(tx_buffer);
+
+    bool res = twr_i2c_write(TWR_I2C_I2C0, &transfer);
+
+    if (res == true)
+    {
+        twr_log_debug("I2C OK");
+    }
+    else
+    {
+        twr_log_debug("I2C FAIL");
+    }
+
+    twr_delay_us(1000);
+}
+
+
+void get_sensor_altitude()
+{
+    twr_i2c_transfer_t transfer;
+    uint8_t tx_buffer[2] = {0x23, 0x22};
+
+    transfer.device_address = SCD41_ADDR;
+    transfer.buffer = tx_buffer;
+    transfer.length = sizeof(tx_buffer);
+
+    bool res = twr_i2c_write(TWR_I2C_I2C0, &transfer);
+
+    if (res == true){
+        twr_log_debug("I2C OK");
+    } else {
+        twr_log_debug("I2C FAIL");
+    }
+
+    twr_delay_us(1000);
+
+    twr_i2c_transfer_t readData;
+    uint8_t rx_buffer[3];
+
+    readData.device_address = SCD41_ADDR;
+    readData.buffer = rx_buffer;
+    readData.length = sizeof(rx_buffer);
+
+    twr_i2c_read(TWR_I2C_I2C0, &readData);
+
+    char tmp[sizeof(rx_buffer) * 2 + 1];
+    for (size_t i = 0; i < sizeof(rx_buffer); i++)
+    {
+        sprintf(tmp + i * 2, "%02x", rx_buffer[i]);
+    }
+
+    twr_log_debug("$SENSOR_ALTITUDE: %s", tmp);
+}
+
+static void calibration_task(void *param){
+    set_automatic_self_calibration_disabled();
+    get_automatic_self_calibration_state();
+    
+    write_sensor_altitude();
+    get_sensor_altitude();
+
+    write_sensor_temperature_offset();
+    get_sensor_temperature_offset();
+
+    perform_forced_recalibration();
+
+    persist_settings();
+
+    twr_log_debug("$CALIBRATION DONE");
+    calibrationMode = false;
+    page_number = 1;
+    clearBuffers();
+    twr_scheduler_plan_relative(update_display_task_id, 100);
+    twr_scheduler_plan_relative(measure_task_id, 200);
 }
 
 void lora_callback(twr_cmwx1zzabz_t *self, twr_cmwx1zzabz_event_t event, void *event_param)
